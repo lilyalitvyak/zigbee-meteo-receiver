@@ -1,0 +1,36 @@
+#ifndef ZIGBEE_DEVICE_H
+#define ZIGBEE_DEVICE_H
+
+#include <stdint.h>
+#include "esp_err.h"
+#include "esp_zigbee_core.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define TEMP_ENDPOINT_NUMBER  1
+#define HUMID_ENDPOINT_NUMBER 2
+
+typedef struct {
+    float current_value;
+    float min_value;
+    float max_value;
+    float resolution;
+    char description[32];
+    uint8_t endpoint;
+} zigbee_analog_device_t;
+
+extern zigbee_analog_device_t g_temp_device;
+extern zigbee_analog_device_t g_humid_device;
+
+esp_err_t zigbee_analog_devices_register(void);
+esp_err_t zigbee_analog_set_value(uint8_t endpoint, float value);
+float zigbee_analog_get_value(uint8_t endpoint);
+esp_err_t zigbee_zcl_core_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

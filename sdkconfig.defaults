@@ -1,0 +1,24 @@
+# --- Target ---
+CONFIG_IDF_TARGET="esp32h2"
+
+# --- Zigbee stack ---
+CONFIG_ZB_ENABLED=y
+# CONFIG_ZB_ZCZR is not set
+CONFIG_ZB_ZED=y
+CONFIG_ZB_RADIO_NATIVE=y
+
+# --- Partition table (custom, содержит zb_storage/zb_fct под стек Zigbee) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- Power management / deep sleep ---
+CONFIG_PM_ENABLE=y
+CONFIG_PM_DFS_INIT_AUTO=y
+CONFIG_PM_PROFILING=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# --- Log level (можно поднять до DEBUG при отладке) ---
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
