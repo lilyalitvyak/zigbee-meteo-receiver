@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
 #include "esp_zigbee_cluster.h"
 #include "esp_zigbee_attribute.h"
 #include "esp_zigbee_endpoint.h"
@@ -10,8 +12,31 @@
 #include "zcl/esp_zigbee_zcl_basic.h"
 #include "zcl/esp_zigbee_zcl_identify.h"
 #include "zcl/esp_zigbee_zcl_command.h"
+#include "zcl/esp_zigbee_zcl_temperature_meas.h"
+#include "zcl/esp_zigbee_zcl_humidity_meas.h"
+#include "zdo/esp_zigbee_zdo_command.h"
 
 static const char *TAG = "ZIGBEE_DEVICE";
+
+static volatile bool s_temp_value_received = false;
+static volatile bool s_humid_value_received = false;
+static volatile bool s_deep_sleep_triggered = false;
+static bool s_deep_sleep_timer_started = false;
+static esp_timer_handle_t s_deep_sleep_timer = NULL;
+
+#define AO_DEEP_SLEEP_SECONDS 110U
+#define AO_DEEP_SLEEP_DELAY_MS 1200U
+
+void zigbee_command_send_status_cb(esp_zb_zcl_command_send_status_message_t message)
+{
+    ESP_LOGI(TAG,
+             "Статус отправки ZCL: status=%d tsn=%u dst_ep=%u src_ep=%u dst_addr=%04x",
+             message.status,
+             message.tsn,
+             message.dst_endpoint,
+             message.src_endpoint,
+             message.dst_addr.u.short_addr);
+}
 
 static void zcl_string_from_cstr(uint8_t *out, size_t out_size, const char *in)
 {
@@ -132,7 +157,7 @@ static esp_err_t create_analog_endpoint(esp_zb_ep_list_t *ep_list,
         .app_device_version = 0,
     };
     ESP_ERROR_CHECK(esp_zb_ep_list_add_ep(ep_list, cluster_list, endpoint_config));
-    ESP_LOGI(TAG, "Added endpoint %d with '%s'", endpoint, device->description);
+    ESP_LOGI(TAG, "Добавлен endpoint %d с '%s'", endpoint, device->description);
     return ESP_OK;
 }
 
@@ -145,7 +170,7 @@ esp_err_t zigbee_analog_devices_register(void)
     ESP_ERROR_CHECK(create_analog_endpoint(ep_list, TEMP_ENDPOINT_NUMBER, &g_temp_device));
     ESP_ERROR_CHECK(create_analog_endpoint(ep_list, HUMID_ENDPOINT_NUMBER, &g_humid_device));
     ESP_ERROR_CHECK(esp_zb_device_register(ep_list));
-    ESP_LOGI(TAG, "Device registered with 2 endpoints");
+    ESP_LOGI(TAG, "Устройство зарегистрировано с 2 endpoints");
     return ESP_OK;
 }
 
@@ -154,15 +179,17 @@ esp_err_t zigbee_analog_set_value(uint8_t endpoint, float value)
     zigbee_analog_device_t *device = NULL;
     if (endpoint == TEMP_ENDPOINT_NUMBER) {
         device = &g_temp_device;
+        s_temp_value_received = true;
     } else if (endpoint == HUMID_ENDPOINT_NUMBER) {
         device = &g_humid_device;
+        s_humid_value_received = true;
     } else {
         return ESP_ERR_INVALID_ARG;
     }
     if (value < device->min_value) value = device->min_value;
     if (value > device->max_value) value = device->max_value;
     device->current_value = value;
-    ESP_LOGI(TAG, "Set %s (ep %d) = %.1f", device->description, endpoint, value);
+    ESP_LOGI(TAG, "Установлено %s (ep %d) = %.1f", device->description, endpoint, value);
     return ESP_OK;
 }
 
@@ -171,6 +198,65 @@ float zigbee_analog_get_value(uint8_t endpoint)
     if (endpoint == TEMP_ENDPOINT_NUMBER) return g_temp_device.current_value;
     if (endpoint == HUMID_ENDPOINT_NUMBER) return g_humid_device.current_value;
     return 0.0f;
+}
+
+void zigbee_remote_values_reset(void)
+{
+    s_temp_value_received = false;
+    s_humid_value_received = false;
+}
+
+bool zigbee_remote_values_ready(void)
+{
+    return s_temp_value_received && s_humid_value_received;
+}
+
+bool zigbee_take_deep_sleep_request(void)
+{
+    // Совместимость со старым путём через main.c: переход в сон теперь
+    // планируется внутренним таймером из callback и здесь всегда false.
+    return false;
+}
+
+static void deep_sleep_timer_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "Таймер deep sleep сработал. Уход в deep sleep на %u секунд", AO_DEEP_SLEEP_SECONDS);
+    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)AO_DEEP_SLEEP_SECONDS * 1000000ULL));
+    esp_deep_sleep_start();
+}
+
+static void ensure_deep_sleep_timer(void)
+{
+    if (s_deep_sleep_timer) {
+        return;
+    }
+
+    const esp_timer_create_args_t args = {
+        .callback = deep_sleep_timer_cb,
+        .arg = NULL,
+        .name = "ao_ds_timer",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&args, &s_deep_sleep_timer));
+}
+
+static void zigbee_enter_deep_sleep_if_ready(void)
+{
+    if (!zigbee_remote_values_ready() || s_deep_sleep_triggered) {
+        return;
+    }
+
+    s_deep_sleep_triggered = true;
+    ensure_deep_sleep_timer();
+    if (!s_deep_sleep_timer_started) {
+        s_deep_sleep_timer_started = true;
+        ESP_LOGI(TAG,
+                 "Оба значения Analog Output получены. Переход в deep sleep через %u ms (сон %u секунд)",
+                 AO_DEEP_SLEEP_DELAY_MS,
+                 AO_DEEP_SLEEP_SECONDS);
+        ESP_ERROR_CHECK(esp_timer_start_once(s_deep_sleep_timer,
+                                             (uint64_t)AO_DEEP_SLEEP_DELAY_MS * 1000ULL));
+    }
 }
 
 esp_err_t zigbee_zcl_core_action_handler(esp_zb_core_action_callback_id_t callback_id,
@@ -199,8 +285,18 @@ esp_err_t zigbee_zcl_core_action_handler(esp_zb_core_action_callback_id_t callba
             return ESP_ERR_INVALID_ARG;
         }
 
-        ESP_LOGI(TAG, "ZCL write analog output: ep=%d, value=%.2f", msg->info.dst_endpoint, value);
-        return zigbee_analog_set_value(msg->info.dst_endpoint, value);
+        esp_err_t err = zigbee_analog_set_value(msg->info.dst_endpoint, value);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        ESP_LOGI(TAG, "Получено значение Analog Output из z2m: ep=%d value=%.2f temp_ready=%s humid_ready=%s",
+                 msg->info.dst_endpoint,
+                 value,
+                 s_temp_value_received ? "true" : "false",
+                 s_humid_value_received ? "true" : "false");
+        zigbee_enter_deep_sleep_if_ready();
+        return ESP_OK;
     }
 
     return ESP_OK;
