@@ -23,9 +23,11 @@ static volatile bool s_humid_value_received = false;
 static volatile bool s_deep_sleep_triggered = false;
 static bool s_deep_sleep_timer_started = false;
 static esp_timer_handle_t s_deep_sleep_timer = NULL;
+static esp_timer_handle_t s_ao_wait_timer = NULL;
 
 #define AO_DEEP_SLEEP_SECONDS 110U
 #define AO_DEEP_SLEEP_DELAY_MS 1200U
+#define AO_WAIT_TIMEOUT_MS 8000U
 
 void zigbee_command_send_status_cb(esp_zb_zcl_command_send_status_message_t message)
 {
@@ -218,12 +220,17 @@ bool zigbee_take_deep_sleep_request(void)
     return false;
 }
 
+static void force_deep_sleep(const char *reason)
+{
+    ESP_LOGI(TAG, "%s Уход в deep sleep на %u секунд", reason, AO_DEEP_SLEEP_SECONDS);
+    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)AO_DEEP_SLEEP_SECONDS * 1000000ULL));
+    esp_deep_sleep_start();
+}
+
 static void deep_sleep_timer_cb(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "Таймер deep sleep сработал. Уход в deep sleep на %u секунд", AO_DEEP_SLEEP_SECONDS);
-    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)AO_DEEP_SLEEP_SECONDS * 1000000ULL));
-    esp_deep_sleep_start();
+    force_deep_sleep("Таймер deep sleep сработал.");
 }
 
 static void ensure_deep_sleep_timer(void)
@@ -240,6 +247,50 @@ static void ensure_deep_sleep_timer(void)
     ESP_ERROR_CHECK(esp_timer_create(&args, &s_deep_sleep_timer));
 }
 
+static void ao_wait_timeout_cb(void *arg)
+{
+    (void)arg;
+    if (s_deep_sleep_triggered) {
+        return;
+    }
+    s_deep_sleep_triggered = true;
+    ESP_LOGW(TAG,
+             "Значения Analog Output не получены за %u ms (temp_ready=%s humid_ready=%s).",
+             AO_WAIT_TIMEOUT_MS,
+             s_temp_value_received ? "true" : "false",
+             s_humid_value_received ? "true" : "false");
+    force_deep_sleep("Принудительный уход по таймауту ожидания.");
+}
+
+static void ensure_ao_wait_timer(void)
+{
+    if (s_ao_wait_timer) {
+        return;
+    }
+
+    const esp_timer_create_args_t args = {
+        .callback = ao_wait_timeout_cb,
+        .arg = NULL,
+        .name = "ao_wait_timer",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&args, &s_ao_wait_timer));
+}
+
+void zigbee_start_ao_wait_timeout(void)
+{
+    if (s_deep_sleep_triggered) {
+        return;
+    }
+
+    ensure_ao_wait_timer();
+    if (esp_timer_is_active(s_ao_wait_timer)) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Запущен таймаут ожидания Analog Output: %u ms", AO_WAIT_TIMEOUT_MS);
+    ESP_ERROR_CHECK(esp_timer_start_once(s_ao_wait_timer, (uint64_t)AO_WAIT_TIMEOUT_MS * 1000ULL));
+}
+
 static void zigbee_enter_deep_sleep_if_ready(void)
 {
     if (!zigbee_remote_values_ready() || s_deep_sleep_triggered) {
@@ -247,6 +298,9 @@ static void zigbee_enter_deep_sleep_if_ready(void)
     }
 
     s_deep_sleep_triggered = true;
+    if (s_ao_wait_timer && esp_timer_is_active(s_ao_wait_timer)) {
+        ESP_ERROR_CHECK(esp_timer_stop(s_ao_wait_timer));
+    }
     ensure_deep_sleep_timer();
     if (!s_deep_sleep_timer_started) {
         s_deep_sleep_timer_started = true;

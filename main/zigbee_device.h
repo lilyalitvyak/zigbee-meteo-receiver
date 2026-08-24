@@ -32,6 +32,7 @@ float zigbee_analog_get_value(uint8_t endpoint);
 void zigbee_remote_values_reset(void);
 bool zigbee_remote_values_ready(void);
 bool zigbee_take_deep_sleep_request(void);
+void zigbee_start_ao_wait_timeout(void);
 void zigbee_command_send_status_cb(esp_zb_zcl_command_send_status_message_t message);
 esp_err_t zigbee_zcl_core_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message);
 

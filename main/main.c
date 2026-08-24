@@ -72,6 +72,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal)
         if (signal->esp_err_status == ESP_OK && !esp_zb_bdb_is_factory_new()) {
             ESP_LOGI(SIGNAL_HANDLER_TAG, "Устройство перезагрузилось и уже имеет сеть");
             ESP_LOGI(SIGNAL_HANDLER_TAG, "Ожидаем значения Analog Output температуры и влажности");
+            zigbee_start_ao_wait_timeout();
         } else {
             ESP_LOGW(SIGNAL_HANDLER_TAG, "Загрузка сохранённой сети не удалась или устройство фабрично новое: status=0x%02x. Запускаем steering заново.",
                      signal->esp_err_status);
@@ -83,7 +84,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal)
             ESP_LOGI(SIGNAL_HANDLER_TAG, "Успешное подключение к сети! PAN ID: 0x%04hx, Channel: %d",
                      esp_zb_get_pan_id(), esp_zb_get_current_channel());
             zigbee_remote_values_reset();
-            ESP_LOGI(SIGNAL_HANDLER_TAG, "Ожидание новых значений Analog Output от z2m");
+            ESP_LOGI(SIGNAL_HANDLER_TAG, "Ожидание новых значений Analog Output от z2m (без таймаута: возможен interview устройства)");
         } else {
             ESP_LOGW(SIGNAL_HANDLER_TAG, "Steering сети завершился с ошибкой: status=0x%02x",
                      signal->esp_err_status);
