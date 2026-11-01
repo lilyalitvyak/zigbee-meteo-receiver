@@ -1,6 +1,7 @@
 #include "zigbee_device.h"
 #include <stdlib.h>
 #include <string.h>
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
@@ -15,8 +16,22 @@
 #include "zcl/esp_zigbee_zcl_temperature_meas.h"
 #include "zcl/esp_zigbee_zcl_humidity_meas.h"
 #include "zdo/esp_zigbee_zdo_command.h"
+#include "boot_diag.h"
+#include "eink_display.h"
+#include "battery_monitor.h"
 
 static const char *TAG = "ZIGBEE_DEVICE";
+
+// Пины дисплея на XIAO ESP32C6 (см. схему подключения).
+#define EINK_I2C_SDA_GPIO 22
+#define EINK_I2C_SCL_GPIO 23
+#define EINK_BUSY_GPIO GPIO_NUM_1
+#define EINK_RST_GPIO GPIO_NUM_2
+// VCC экрана — постоянное питание (3.3В), не через GPIO: попытка
+// обесточивать экран через GPIO (см. историю) не позволяла ему запуститься
+// при питании от батареи — судя по всему, GPIO не мог обеспечить нужный
+// пусковой ток/напряжение при просевшем от батареи 3.3В.
+#define BATTERY_LOW_THRESHOLD_V 3.5f
 
 static volatile bool s_temp_value_received = false;
 static volatile bool s_humid_value_received = false;
@@ -26,7 +41,10 @@ static esp_timer_handle_t s_deep_sleep_timer = NULL;
 static esp_timer_handle_t s_ao_wait_timer = NULL;
 
 #define AO_DEEP_SLEEP_SECONDS 110U
-#define AO_DEEP_SLEEP_DELAY_MS 1200U
+// Запас сверх ожидания BUSY внутри eink_display_refresh() (см.
+// EPD_BUSY_TIMEOUT_MS в epd_1in9.c) — на случай, если контроллеру нужно
+// какое-то время после снятия BUSY, прежде чем безопасно уходить в сон.
+#define AO_DEEP_SLEEP_DELAY_MS 2000U
 #define AO_WAIT_TIMEOUT_MS 8000U
 
 void zigbee_command_send_status_cb(esp_zb_zcl_command_send_status_message_t message)
@@ -163,6 +181,15 @@ static esp_err_t create_analog_endpoint(esp_zb_ep_list_t *ep_list,
     return ESP_OK;
 }
 
+void zigbee_display_peripherals_init(void)
+{
+    esp_err_t err = battery_monitor_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Не удалось инициализировать измерение батареи: %s", esp_err_to_name(err));
+    }
+    eink_display_init(EINK_I2C_SDA_GPIO, EINK_I2C_SCL_GPIO, EINK_BUSY_GPIO, EINK_RST_GPIO);
+}
+
 esp_err_t zigbee_analog_devices_register(void)
 {
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
@@ -223,6 +250,7 @@ bool zigbee_take_deep_sleep_request(void)
 static void force_deep_sleep(const char *reason)
 {
     ESP_LOGI(TAG, "%s Уход в deep sleep на %u секунд", reason, AO_DEEP_SLEEP_SECONDS);
+    boot_diag_checkpoint(BOOT_CP_ENTERING_SLEEP);
     ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)AO_DEEP_SLEEP_SECONDS * 1000000ULL));
     esp_deep_sleep_start();
 }
@@ -254,6 +282,7 @@ static void ao_wait_timeout_cb(void *arg)
         return;
     }
     s_deep_sleep_triggered = true;
+    boot_diag_checkpoint(BOOT_CP_AO_TIMEOUT);
     ESP_LOGW(TAG,
              "Значения Analog Output не получены за %u ms (temp_ready=%s humid_ready=%s).",
              AO_WAIT_TIMEOUT_MS,
@@ -287,6 +316,7 @@ void zigbee_start_ao_wait_timeout(void)
         return;
     }
 
+    boot_diag_checkpoint(BOOT_CP_AO_WAIT_STARTED);
     ESP_LOGI(TAG, "Запущен таймаут ожидания Analog Output: %u ms", AO_WAIT_TIMEOUT_MS);
     ESP_ERROR_CHECK(esp_timer_start_once(s_ao_wait_timer, (uint64_t)AO_WAIT_TIMEOUT_MS * 1000ULL));
 }
@@ -301,6 +331,15 @@ static void zigbee_enter_deep_sleep_if_ready(void)
     if (s_ao_wait_timer && esp_timer_is_active(s_ao_wait_timer)) {
         ESP_ERROR_CHECK(esp_timer_stop(s_ao_wait_timer));
     }
+
+    float battery_voltage = battery_monitor_read_voltage();
+    ESP_LOGI(TAG, "Напряжение батареи: %.2f В (порог разряда: %.1f В)",
+             battery_voltage, BATTERY_LOW_THRESHOLD_V);
+    eink_display_set_numbers(g_temp_device.current_value, g_humid_device.current_value);
+    eink_display_set_low_power_indicator(battery_voltage < BATTERY_LOW_THRESHOLD_V);
+    eink_display_refresh();
+    boot_diag_checkpoint(BOOT_CP_DISPLAY_REFRESHED);
+
     ensure_deep_sleep_timer();
     if (!s_deep_sleep_timer_started) {
         s_deep_sleep_timer_started = true;

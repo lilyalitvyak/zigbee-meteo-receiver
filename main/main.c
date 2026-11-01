@@ -6,6 +6,7 @@
 #include "esp_sleep.h"
 #include "nvs_flash.h"
 #include "esp_zigbee_core.h"
+#include "boot_diag.h"
 #include "main.h"
 #include "zigbee_device.h"
 
@@ -72,6 +73,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal)
         if (signal->esp_err_status == ESP_OK && !esp_zb_bdb_is_factory_new()) {
             ESP_LOGI(SIGNAL_HANDLER_TAG, "Устройство перезагрузилось и уже имеет сеть");
             ESP_LOGI(SIGNAL_HANDLER_TAG, "Ожидаем значения Analog Output температуры и влажности");
+            boot_diag_checkpoint(BOOT_CP_ZB_REJOINED);
             zigbee_start_ao_wait_timeout();
         } else {
             ESP_LOGW(SIGNAL_HANDLER_TAG, "Загрузка сохранённой сети не удалась или устройство фабрично новое: status=0x%02x. Запускаем steering заново.",
@@ -84,6 +86,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal)
             ESP_LOGI(SIGNAL_HANDLER_TAG, "Успешное подключение к сети! PAN ID: 0x%04hx, Channel: %d",
                      esp_zb_get_pan_id(), esp_zb_get_current_channel());
             zigbee_remote_values_reset();
+            boot_diag_checkpoint(BOOT_CP_ZB_STEERING_OK);
             ESP_LOGI(SIGNAL_HANDLER_TAG, "Ожидание новых значений Analog Output от z2m (без таймаута: возможен interview устройства)");
         } else {
             ESP_LOGW(SIGNAL_HANDLER_TAG, "Steering сети завершился с ошибкой: status=0x%02x",
@@ -105,18 +108,27 @@ static void esp_zigbee_stack_main_task(void *arg)
         .install_code_policy = false,
         .nwk_cfg.zed_cfg = {
             .ed_timeout = ESP_ZB_ED_AGING_TIMEOUT_64MIN,
-            .keep_alive = 3000,
+            .keep_alive = 200,
         },
     };
 
+    // Инициализация стека Zigbee с заданной конфигурацией устройства
     esp_zb_init(&config);
+    // Установка основного набора каналов сети
     ESP_ERROR_CHECK(esp_zb_set_primary_network_channel_set(ESP_ZIGBEE_PRIMARY_CHANNEL_MASK));
+    // Установка резервного набора каналов сети
     ESP_ERROR_CHECK(esp_zb_set_secondary_network_channel_set(ESP_ZIGBEE_SECONDARY_CHANNEL_MASK));
+    // Отключение приёма в режиме простоя для экономии энергии
     esp_zb_set_rx_on_when_idle(false);
+    // Регистрация кластеров/эндпоинтов Analog Output устройства
     ESP_ERROR_CHECK(zigbee_analog_devices_register());
+    // Регистрация обработчика основных действий ZCL
     esp_zb_core_action_handler_register(zigbee_zcl_core_action_handler);
+    // Регистрация обработчика статусов отправки команд
     esp_zb_zcl_command_send_status_handler_register(zigbee_command_send_status_cb);
+    // Запуск стека Zigbee (без автоматического формирования сети)
     ESP_ERROR_CHECK(esp_zb_start(false));
+    boot_diag_checkpoint(BOOT_CP_ZB_STACK_STARTED);
 
     int64_t last_log_us = 0;
 
@@ -151,12 +163,20 @@ static void esp_zigbee_stack_main_task(void *arg)
 
 void app_main(void)
 {
+    boot_diag_init_and_dump();
     ESP_LOGI(TAG, "=== ЗАПУСК ПРИЛОЖЕНИЯ ===");
     startup_light_sleep_once();
+    boot_diag_checkpoint(BOOT_CP_STARTUP_SLEEP_DONE);
     ESP_LOGI(TAG, "Таймер 1 запущен: отладочная пауза %u ms", STARTUP_DEBUG_DELAY_MS);
-    vTaskDelay(pdMS_TO_TICKS(STARTUP_DEBUG_DELAY_MS));
+    // Отключено для экономии заряда. Раскомментировать при отладке по UART
+    // (крашах и необходимости успеть скопировать лог до следующего перезапуска).
+    // vTaskDelay(pdMS_TO_TICKS(STARTUP_DEBUG_DELAY_MS));
     ESP_LOGI(TAG, "Таймер 1 завершён: переходим к ожиданию данных Analog Output");
+    zigbee_display_peripherals_init();
+    boot_diag_checkpoint(BOOT_CP_DISPLAY_INIT_DONE);
     ESP_ERROR_CHECK(nvs_flash_init());
+    boot_diag_checkpoint(BOOT_CP_NVS_INIT_DONE);
     ESP_LOGI(TAG, "Запуск стека ESP Zigbee");
     xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
+    boot_diag_checkpoint(BOOT_CP_ZB_TASK_STARTED);
 }

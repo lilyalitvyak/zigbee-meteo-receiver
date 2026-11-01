@@ -26,6 +26,7 @@ typedef struct {
 extern zigbee_analog_device_t g_temp_device;
 extern zigbee_analog_device_t g_humid_device;
 
+void zigbee_display_peripherals_init(void);
 esp_err_t zigbee_analog_devices_register(void);
 esp_err_t zigbee_analog_set_value(uint8_t endpoint, float value);
 float zigbee_analog_get_value(uint8_t endpoint);
