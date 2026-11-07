@@ -167,11 +167,12 @@ void app_main(void)
     ESP_LOGI(TAG, "=== ЗАПУСК ПРИЛОЖЕНИЯ ===");
     startup_light_sleep_once();
     boot_diag_checkpoint(BOOT_CP_STARTUP_SLEEP_DONE);
-    ESP_LOGI(TAG, "Таймер 1 запущен: отладочная пауза %u ms", STARTUP_DEBUG_DELAY_MS);
+    // ESP_LOGI(TAG, "Таймер 1 запущен: отладочная пауза %u ms", STARTUP_DEBUG_DELAY_MS);
     // Отключено для экономии заряда. Раскомментировать при отладке по UART
     // (крашах и необходимости успеть скопировать лог до следующего перезапуска).
     // vTaskDelay(pdMS_TO_TICKS(STARTUP_DEBUG_DELAY_MS));
-    ESP_LOGI(TAG, "Таймер 1 завершён: переходим к ожиданию данных Analog Output");
+    // ESP_LOGI(TAG, "Таймер 1 завершён: переходим к ожиданию данных Analog Output");
+    ESP_LOGI(TAG, "Ожидание данных Analog Output");
     zigbee_display_peripherals_init();
     boot_diag_checkpoint(BOOT_CP_DISPLAY_INIT_DONE);
     ESP_ERROR_CHECK(nvs_flash_init());
